@@ -11,6 +11,7 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"github.com/sstallion/go-hid"
 
 	"github.com/brocaar/chirpstack-api/go/v3/gw"
 	"github.com/brocaar/lorawan"
@@ -232,6 +233,59 @@ func NewDevice(ctx context.Context, wg *sync.WaitGroup, opts ...DeviceOption) (*
 	return d, nil
 }
 
+const VID = 0x1209
+const PID = 0x7d01
+
+func recvUSB() ([]byte, error) {
+	if err := hid.Init(); err != nil {
+		return nil, err
+	}
+
+	d, err := hid.OpenFirst(VID, PID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := []byte{}
+	buf := make([]byte, 0x100)
+
+	cnt, err := d.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	for err == nil {
+		payload = append(payload, buf[:cnt]...)
+		cnt, err = d.ReadWithTimeout(buf, time.Millisecond*500)
+	}
+
+	d.Close()
+
+	return payload, nil
+}
+
+func sendUSB(data []byte) error {
+	if err := hid.Init(); err != nil {
+		return err
+	}
+
+	d, err := hid.OpenFirst(VID, PID)
+	if err != nil {
+		return err
+	}
+
+	payload := []byte{0x0}
+	payload = append(payload, data...)
+
+	if _, err := d.Write(payload); err != nil {
+		return err
+	}
+
+	d.Close()
+
+	return nil
+}
+
 // uplinkLoop first handle the OTAA activation, after which it will periodically
 // sends an uplink with the configured payload and fport.
 func (d *Device) uplinkLoop() {
@@ -249,8 +303,12 @@ func (d *Device) uplinkLoop() {
 	for !cancelled {
 		switch d.getState() {
 		case deviceStateOTAA:
-			d.joinRequest()
-			time.Sleep(6 * time.Second)
+			data, err := recvUSB()
+			if err == nil {
+				d.joinRequest(data)
+			} else {
+				time.Sleep(time.Second)
+			}
 		case deviceStateActivated:
 			d.dataUp()
 
@@ -292,7 +350,16 @@ func (d *Device) downlinkLoop() {
 
 				switch phy.MHDR.MType {
 				case lorawan.JoinAccept:
-					return d.joinAccept(phy)
+					b, err := phy.MarshalBinary()
+					if err != nil {
+						log.Println("marshal binary failed")
+					} else {
+						log.Println("Sending LoRa response over USB: ", len(b))
+						if err = sendUSB(b); err != nil {
+							log.Println("Usb send error: ", err)
+						}
+					}
+					//return d.joinAccept(phy)
 				case lorawan.UnconfirmedDataDown, lorawan.ConfirmedDataDown:
 					return d.downlinkData(phy)
 				}
@@ -308,6 +375,7 @@ func (d *Device) downlinkLoop() {
 }
 
 // joinRequest sends the join-request.
+/*
 func (d *Device) joinRequest() {
 	log.WithFields(log.Fields{
 		"dev_eui": d.devEUI,
@@ -331,6 +399,50 @@ func (d *Device) joinRequest() {
 	}
 
 	d.sendUplink(phy)
+
+	deviceJoinRequestCounter().Inc()
+}
+*/
+// joinRequest sends the join-request.
+
+func (d *Device) joinRequest(data []byte) {
+	log.WithFields(log.Fields{
+		"dev_eui": d.devEUI,
+	}).Debug("simulator: send OTAA request")
+
+	log.Println("Data size I received: ", len(data))
+
+	var phy lorawan.PHYPayload
+	err := phy.UnmarshalBinary(data)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	/*
+		phy := lorawan.PHYPayload{
+			MHDR: lorawan.MHDR{
+				MType: lorawan.JoinRequest,
+				Major: lorawan.LoRaWANR1,
+			},
+			MACPayload: &lorawan.JoinRequestPayload{
+				DevEUI:   d.devEUI,
+				JoinEUI:  d.joinEUI,
+				DevNonce: d.getDevNonce(),
+			},
+		}
+
+		if err := phy.SetUplinkJoinMIC(d.appKey); err != nil {
+			log.WithError(err).Error("simulator: set uplink join mic error")
+			return
+		}
+	*/
+
+	err = d.sendUplink(phy)
+	if err != nil {
+		log.Error(err)
+		return
+	}
 
 	deviceJoinRequestCounter().Inc()
 }

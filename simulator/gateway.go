@@ -226,7 +226,7 @@ func (g *Gateway) SendUplinkFrame(pl gw.UplinkFrame) error {
 		Context:   []byte{0x01, 0x02, 0x03, 0x04},
 		UplinkId:  uplinkID[:],
 	}
-
+	
 	b, err := proto.Marshal(&pl)
 	if err != nil {
 		return errors.Wrap(err, "send uplink frame error")
